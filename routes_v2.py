@@ -444,6 +444,7 @@ def user_register():
         'is_online': True,
         'is_paid': False, # Default to unpaid
         'age': payload.get('age'),
+        'gender': payload.get('gender', 'not_specified'), # Added gender for matching logic
         'interests': payload.get('interests', []),
         'intent': payload.get('intent', 'friendship'), # 'friendship' or 'relationship'
         'created_at': time.time(),
@@ -484,33 +485,103 @@ def user_register():
 @v2_blueprint.route('/users/discover', methods=['GET'])
 @token_required
 def discover_users(current_user_id):
-    """Returns all available students for discovery with optimized querying."""
+    """Returns students with AI-powered compatibility scoring."""
     try:
-        # Optimization: Fetch only students using a query.
-        # Note: Ensure .indexOn: ["role"] is added to Firebase rules for maximum speed.
+        # 1. Fetch current user data for context
+        current_user = firebase.get_db_reference(f'/users/{current_user_id}').get()
+        if not current_user:
+            return jsonify({"status": "error", "message": "Current user not found."}), 404
+
+        # 2. Fetch all students
         users_ref = firebase.get_db_reference('/users')
-        query = users_ref.order_by_child('role').equal_to('student').limit_to_first(50)
+        query = users_ref.order_by_child('role').equal_to('student').limit_to_first(100)
         all_students = query.get() or {}
         
         discovery_list = []
+        user_age = current_user.get('age', 21)
+        user_interests = set(current_user.get('interests', []))
+        user_gender = current_user.get('gender', 'other')
+
         for uid, data in all_students.items():
-            # Skip the current user
             if uid == current_user_id:
                 continue
             
-            # Discovery data payload
+            # AI Compatibility Logic
+            target_age = data.get('age', 21)
+            target_interests = set(data.get('interests', []))
+            target_gender = data.get('gender', 'other')
+            
+            score = 50 # Base score
+            
+            # Interest Overlap (Hobbies)
+            common = user_interests.intersection(target_interests)
+            score += len(common) * 10
+            
+            # Strategic Age Bracket Logic (+/- 3 years)
+            age_diff = user_age - target_age
+            if abs(age_diff) <= 3:
+                score += 20
+                # Specific "Male higher, Female lower" synergy bonus
+                if user_gender == 'male' and target_gender == 'female' and age_diff >= 0:
+                    score += 15
+                elif user_gender == 'female' and target_gender == 'male' and age_diff <= 0:
+                    score += 15
+
+            # Cap score at 99%
+            final_score = min(score, 99)
+
             discovery_list.append({
                 'id': uid,
                 'full_name': data.get('full_name'),
                 'institution': data.get('institution'),
                 'is_online': data.get('is_online', False),
                 'profile_photo': data.get('profile_photo'),
-                'age': data.get('age'),
+                'age': target_age,
                 'intent': data.get('intent'),
-                'interests': data.get('interests', [])
+                'interests': data.get('interests', []),
+                'compatibility': final_score
             })
             
+        # Sort by compatibility
+        discovery_list.sort(key=lambda x: x['compatibility'], reverse=True)
+            
         return jsonify({"status": "success", "data": discovery_list}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@v2_blueprint.route('/users/like', methods=['POST'])
+@token_required
+def like_user(current_user_id):
+    """Marks interest and triggers instant mutual matching."""
+    payload = request.get_json(silent=True) or {}
+    target_id = payload.get('target_id')
+    
+    if not target_id:
+        return jsonify({"status": "error", "message": "Target ID required."}), 400
+
+    try:
+        # INSTANT MATCH PROTOCOL: In this AI network, a like results in an automatic connection
+        match_id = f"match_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
+        # 1. Log the Match
+        match_data = {
+            'match_id': match_id,
+            'users': [current_user_id, target_id],
+            'timestamp': time.time(),
+            'status': 'active'
+        }
+        
+        firebase.get_db_reference(f'/matches/{match_id}').set(match_data)
+        
+        # 2. Update both users' match lists
+        firebase.get_db_reference(f'/users/{current_user_id}/matches/{target_id}').set(match_id)
+        firebase.get_db_reference(f'/users/{target_id}/matches/{current_user_id}').set(match_id)
+        
+        return jsonify({
+            "status": "success", 
+            "message": "Instant match established! Network connection live.",
+            "match_id": match_id
+        }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -521,7 +592,7 @@ def update_profile(current_user_id):
     payload = request.get_json(silent=True) or {}
     
     # List of allowed fields to update
-    updatable_fields = ['full_name', 'age', 'interests', 'intent', 'phone', 'is_online']
+    updatable_fields = ['full_name', 'age', 'interests', 'intent', 'phone', 'is_online', 'gender']
     update_data = {k: v for k, v in payload.items() if k in updatable_fields}
     
     if not update_data:
