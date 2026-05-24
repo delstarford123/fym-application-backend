@@ -181,6 +181,21 @@ def mpesa_stk_push(current_user_id):
     if not phone_number or not amount:
         return jsonify({"status": "error", "message": "Phone number and amount are required."}), 400
 
+    # PROMO BYPASS: Grant instant access for the specified testing/promo number
+    clean_phone = phone_number.strip()
+    if clean_phone in ['0707605751', '254707605751']:
+        print(f"[PROMO] Instant access granted for promo number: {clean_phone}")
+        firebase.get_db_reference(f'/users/{current_user_id}').update({
+            'is_paid': True,
+            'subscription_type': 'promo_free',
+            'expiry_date': time.time() + (30 * 24 * 3600) # 1 month access
+        })
+        return jsonify({
+            "status": "success", 
+            "message": "Promo number detected. Instant premium access granted!", 
+            "checkout_id": "PROMO_BYPASS_SUCCESS"
+        }), 200
+
     # 1. Initiate STK Push
     result = mpesa.initiate_stk_push(phone_number, amount, account_ref, description)
 
