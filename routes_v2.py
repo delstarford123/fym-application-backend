@@ -3,12 +3,14 @@ from functools import wraps
 import time
 import jwt
 import uuid
+import random
 from werkzeug.utils import secure_filename
 from firebase_manager import FirebaseManager
 from jwt_manager import generate_jwt, decode_jwt
 from institution_validator import InstitutionValidator
 from security_utils import hash_password, verify_password
 from mpesa_manager import MpesaManager
+from email_manager import EmailManager
 from voice_proxy import VoiceProxy
 import json
 
@@ -330,29 +332,66 @@ def get_institutions():
         "data": institutions
     }), 200
 
-@v2_blueprint.route('/auth/verify_credentials', methods=['POST'])
-def verify_student_credentials():
-    """
-    Step 1: Verify student identity before allowing full registration.
-    Ensures the user is actually a student of the claimed institution.
-    """
+@v2_blueprint.route('/auth/send_otp', methods=['POST'])
+def send_otp():
+    """Generates and sends a 6-digit OTP to the provided student email."""
     payload = request.get_json(silent=True) or {}
+    email = payload.get('email', '').lower().strip()
     institution_id = payload.get('institution_id')
     reg_number = payload.get('reg_number')
 
-    if not institution_id or not reg_number:
-        return jsonify({"status": "error", "message": "Institution and registration number are required."}), 400
+    if not all([email, institution_id, reg_number]):
+        return jsonify({"status": "error", "message": "Missing verification parameters."}), 400
 
-    if InstitutionValidator.validate_registration_number(institution_id, reg_number):
-        return jsonify({
-            "status": "success", 
-            "message": "Student credentials verified. You may proceed to registration."
-        }), 200
+    # 1. Validate the Reg Number format first
+    if not InstitutionValidator.validate_registration_number(institution_id, reg_number):
+        return jsonify({"status": "error", "message": "Invalid student ID format."}), 400
+
+    # 2. Generate 6-digit code
+    otp_code = str(random.randint(100000, 999999))
+    
+    # 3. Store in Firebase with timestamp
+    safe_email = email.replace('.', ',')
+    firebase.get_db_reference(f'/otp_codes/{safe_email}').set({
+        'code': otp_code,
+        'expires_at': time.time() + 600 # 10 minutes
+    })
+
+    # 4. Send via Email Gateway
+    success = EmailManager.send_otp(email, otp_code)
+    
+    if success:
+        return jsonify({"status": "success", "message": "Verification code sent to your email."}), 200
     else:
-        return jsonify({
-            "status": "error", 
-            "message": f"Invalid registration number format for the selected institution."
-        }), 400
+        return jsonify({"status": "error", "message": "Failed to deliver email. Check your address."}), 500
+
+@v2_blueprint.route('/auth/verify_otp', methods=['POST'])
+def verify_otp():
+    """Validates the 6-digit code provided by the user."""
+    payload = request.get_json(silent=True) or {}
+    email = payload.get('email', '').lower().strip()
+    provided_code = payload.get('code')
+
+    if not email or not provided_code:
+        return jsonify({"status": "error", "message": "Missing email or code."}), 400
+
+    safe_email = email.replace('.', ',')
+    otp_ref = firebase.get_db_reference(f'/otp_codes/{safe_email}')
+    otp_data = otp_ref.get()
+
+    if not otp_data:
+        return jsonify({"status": "error", "message": "No active verification found. Request a new code."}), 404
+
+    if time.time() > otp_data['expires_at']:
+        otp_ref.delete()
+        return jsonify({"status": "error", "message": "Verification code expired."}), 400
+
+    if str(provided_code) == str(otp_data['code']):
+        # Mark as verified (optional: use a flag for registration step)
+        otp_ref.delete()
+        return jsonify({"status": "success", "message": "Identity verified successfully."}), 200
+    else:
+        return jsonify({"status": "error", "message": "Incorrect verification code."}), 400
 
 @v2_blueprint.route('/auth/register', methods=['POST'])
 def user_register():
