@@ -412,6 +412,60 @@ def verify_otp():
     else:
         return jsonify({"status": "error", "message": "Incorrect verification code."}), 400
 
+@v2_blueprint.route('/auth/forgot_password', methods=['POST'])
+def forgot_password():
+    """Initiates password recovery by sending an OTP to the user's email."""
+    payload = request.get_json(silent=True) or {}
+    email = payload.get('email', '').lower().strip()
+
+    if not email:
+        return jsonify({"status": "error", "message": "Email is required."}), 400
+
+    safe_email = email.replace('.', ',')
+    user_ref = firebase.get_db_reference(f'/users/{safe_email}')
+    if not user_ref.get():
+        return jsonify({"status": "error", "message": "User with this email not found."}), 404
+
+    # 1. Generate 6-digit code
+    otp_code = str(random.randint(100000, 999999))
+    
+    # 2. Store in Firebase with timestamp
+    firebase.get_db_reference(f'/otp_codes/{safe_email}').set({
+        'code': otp_code,
+        'expires_at': time.time() + 600 # 10 minutes
+    })
+
+    # 3. Send via Email Gateway
+    success = EmailManager.send_otp(email, otp_code)
+    
+    if success:
+        return jsonify({"status": "success", "message": "Recovery code sent to your email."}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to deliver recovery email."}), 500
+
+@v2_blueprint.route('/auth/reset_password', methods=['POST'])
+def reset_password():
+    """Updates the user's password after successful OTP verification."""
+    payload = request.get_json(silent=True) or {}
+    email = payload.get('email', '').lower().strip()
+    new_password = payload.get('new_password')
+
+    if not all([email, new_password]):
+        return jsonify({"status": "error", "message": "Email and new password required."}), 400
+
+    safe_email = email.replace('.', ',')
+    user_ref = firebase.get_db_reference(f'/users/{safe_email}')
+    
+    if not user_ref.get():
+        return jsonify({"status": "error", "message": "User not found."}), 404
+
+    # Update password hash
+    user_ref.update({
+        'password_hash': hash_password(new_password)
+    })
+
+    return jsonify({"status": "success", "message": "Password updated successfully."}), 200
+
 @v2_blueprint.route('/auth/register', methods=['POST'])
 def user_register():
     """
@@ -714,7 +768,8 @@ def user_login():
         return jsonify({
             "status": "success", 
             "message": "Authentication successful.",
-            "token": token
+            "token": token,
+            "role": user_data.get('role', 'student')
         }), 200
     
     print(f"[AUTH] Login failed: Incorrect password for {email}.")
