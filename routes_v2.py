@@ -39,9 +39,11 @@ def allowed_file(filename: str) -> bool:
     """Validates the file extension against approved formats."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+from firebase_admin import auth, db # Added auth
+
 def token_required(f):
     """
-    Middleware decorator to enforce JWT validation on protected V2 endpoints.
+    Middleware decorator to enforce Firebase ID Token validation on protected V2 endpoints.
     Automatically handles missing, invalid, or expired tokens.
     """
     @wraps(f)
@@ -59,14 +61,13 @@ def token_required(f):
             return jsonify({'status': 'error', 'message': 'Authentication token is missing.'}), 401
 
         try:
-            # Decode the token. PyJWT automatically verifies the 'exp' timestamp.
-            decoded_data = decode_jwt(token)
-            current_user_id = decoded_data['sub']
+            # Let the Firebase Admin SDK verify the signature and expiration natively
+            decoded_token = auth.verify_id_token(token)
+            current_user_id = decoded_token['uid']
             
-        except jwt.ExpiredSignatureError:
-            return jsonify({'status': 'error', 'message': 'Session expired. Please log in again.'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'status': 'error', 'message': 'Invalid authentication token.'}), 401
+        except Exception as e:
+            # Covers expired tokens, invalid signatures, or revoked sessions
+            return jsonify({'status': 'error', 'message': 'Invalid or expired Firebase session.'}), 401
 
         # Pass the decoded user ID into the protected route
         return f(current_user_id, *args, **kwargs)
@@ -761,17 +762,21 @@ def user_login():
         print(f"[AUTH] Login successful: {email}")
         # Mark user as online
         user_ref.update({'is_online': True})
-        
-        # Generate the secure token
-        token = generate_jwt(safe_email_key)
-        
-        return jsonify({
-            "status": "success", 
-            "message": "Authentication successful.",
-            "token": token,
-            "role": user_data.get('role', 'student')
-        }), 200
-    
+
+        try:
+            # Generate the Firebase Custom Token using the user's unique ID (safe_email_key)
+            custom_token_bytes = auth.create_custom_token(safe_email_key)
+            firebase_token = custom_token_bytes.decode('utf-8')
+
+            return jsonify({
+                "status": "success", 
+                "message": "Authentication successful.",
+                "firebase_token": firebase_token,
+                "role": user_data.get('role', 'student')
+            }), 200
+        except Exception as e:
+            print(f"[AUTH ERROR] Failed to mint custom token: {e}")
+            return jsonify({"status": "error", "message": "Internal server error during token generation."}), 500    
     print(f"[AUTH] Login failed: Incorrect password for {email}.")
     return jsonify({"status": "error", "message": "Invalid credentials"}), 401
 
