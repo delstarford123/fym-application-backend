@@ -1,0 +1,7 @@
+Flask
+firebase-admin
+gevent
+gevent-websocket
+PyJWT
+requests
+python-dotenv
